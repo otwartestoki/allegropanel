@@ -157,7 +157,10 @@ export default function Home() {
 
     const printWindow = window.open("", "_blank");
 
-    if (!printWindow) return;
+    if (!printWindow) {
+      alert("Przeglądarka zablokowała okno wydruku. Zezwól na popupy.");
+      return;
+    }
 
     printWindow.document.write(`
       <!doctype html>
@@ -218,15 +221,16 @@ export default function Home() {
               ${rows}
             </tbody>
           </table>
-
-          <script>
-            window.print();
-          </script>
         </body>
       </html>
     `);
 
     printWindow.document.close();
+
+    setTimeout(() => {
+      printWindow.focus();
+      printWindow.print();
+    }, 500);
   }
 
   return (
