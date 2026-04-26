@@ -38,9 +38,21 @@ type BillingEntry = {
   order_id: string | null;
 };
 
-function yesterday() {
+type PaymentRow = BillingEntry & {
+  source: "sale" | "billing";
+};
+
+function daysAgo(days: number) {
   const d = new Date();
-  d.setDate(d.getDate() - 1);
+  d.setDate(d.getDate() - days);
+
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 10);
+}
+
+function today() {
+  const d = new Date();
 
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
     .toISOString()
@@ -60,10 +72,11 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
 
-  const [dateFrom, setDateFrom] = useState(yesterday());
-  const [dateTo, setDateTo] = useState(yesterday());
+  const [dateFrom, setDateFrom] = useState(daysAgo(30));
+  const [dateTo, setDateTo] = useState(today());
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [paymentTypeFilter, setPaymentTypeFilter] = useState("ALL");
+  const [hideCodSales, setHideCodSales] = useState(false);
 
   useEffect(() => {
     async function loadData() {
@@ -118,16 +131,6 @@ export default function Home() {
     ).sort();
   }, [orders]);
 
-  const paymentTypes = useMemo(() => {
-    return Array.from(
-      new Set(
-        payments
-          .map((p) => p.type_name || p.type_id)
-          .filter((s): s is string => Boolean(s))
-      )
-    ).sort();
-  }, [payments]);
-
   const filteredOrders = useMemo(() => {
     return orders.filter((order) => {
       if (
@@ -157,12 +160,30 @@ export default function Home() {
     });
   }, [orders, dateFrom, dateTo, statusFilter]);
 
-  const filteredPayments = useMemo(() => {
+  const ordersById = useMemo(() => {
+    const result: Record<string, Order> = {};
+
+    orders.forEach((order) => {
+      result[order.id] = order;
+    });
+
+    return result;
+  }, [orders]);
+
+  const filteredBillingEntries = useMemo(() => {
     return payments.filter((payment) => {
       const paymentType = payment.type_name || payment.type_id || "";
 
       if (paymentTypeFilter !== "ALL" && paymentType !== paymentTypeFilter) {
         return false;
+      }
+
+      if (hideCodSales && payment.order_id) {
+        const relatedOrder = ordersById[payment.order_id];
+
+        if (relatedOrder?.payment_kind === "Pobranie") {
+          return false;
+        }
       }
 
       if (dateFrom || dateTo) {
@@ -183,7 +204,57 @@ export default function Home() {
 
       return true;
     });
-  }, [payments, dateFrom, dateTo, paymentTypeFilter]);
+  }, [payments, dateFrom, dateTo, paymentTypeFilter, hideCodSales, ordersById]);
+
+  const salesAsPayments = useMemo<PaymentRow[]>(() => {
+    return filteredOrders
+      .filter((order) => order.fulfillment_status !== "Anulowane")
+      .filter((order) => {
+        if (!hideCodSales) return true;
+        return order.payment_kind !== "Pobranie";
+      })
+      .map((order) => ({
+        id: `sale-${order.id}`,
+        occurred_at: order.updated_at,
+        type_id: "SALE",
+        type_name: "Wpływ ze sprzedaży",
+        amount: Number(order.total_amount ?? 0),
+        currency: order.currency ?? "PLN",
+        direction: "plus",
+        balance_amount: null,
+        balance_currency: "PLN",
+        offer_id: null,
+        offer_name: order.buyer_login,
+        order_id: order.id,
+        source: "sale",
+      }));
+  }, [filteredOrders, hideCodSales]);
+
+  const billingAsPayments = useMemo<PaymentRow[]>(() => {
+    return filteredBillingEntries.map((payment) => ({
+      ...payment,
+      source: "billing",
+    }));
+  }, [filteredBillingEntries]);
+
+  const allPayments = useMemo<PaymentRow[]>(() => {
+    return [...salesAsPayments, ...billingAsPayments].sort((a, b) => {
+      const dateA = a.occurred_at ? new Date(a.occurred_at).getTime() : 0;
+      const dateB = b.occurred_at ? new Date(b.occurred_at).getTime() : 0;
+
+      return dateB - dateA;
+    });
+  }, [salesAsPayments, billingAsPayments]);
+
+  const paymentTypes = useMemo(() => {
+    return Array.from(
+      new Set(
+        allPayments
+          .map((p) => p.type_name || p.type_id)
+          .filter((s): s is string => Boolean(s))
+      )
+    ).sort();
+  }, [allPayments]);
 
   const activeOrders = filteredOrders.filter(
     (o) => o.fulfillment_status !== "Anulowane"
@@ -198,11 +269,11 @@ export default function Home() {
     (o) => o.fulfillment_status === "Anulowane"
   ).length;
 
-  const paymentsPlus = filteredPayments
+  const paymentsPlus = allPayments
     .filter((p) => Number(p.amount ?? 0) > 0)
     .reduce((sum, p) => sum + Number(p.amount ?? 0), 0);
 
-  const paymentsMinus = filteredPayments
+  const paymentsMinus = allPayments
     .filter((p) => Number(p.amount ?? 0) < 0)
     .reduce((sum, p) => sum + Number(p.amount ?? 0), 0);
 
@@ -219,16 +290,16 @@ export default function Home() {
     return result;
   }, [activeOrders]);
 
-  const sumsByBillingType = useMemo(() => {
+  const sumsByPaymentType = useMemo(() => {
     const result: Record<string, number> = {};
 
-    filteredPayments.forEach((payment) => {
+    allPayments.forEach((payment) => {
       const key = payment.type_name || payment.type_id || "Brak danych";
       result[key] = (result[key] || 0) + Number(payment.amount ?? 0);
     });
 
     return result;
-  }, [filteredPayments]);
+  }, [allPayments]);
 
   function printSimpleList() {
     const rows =
@@ -244,12 +315,17 @@ export default function Home() {
             `
             )
             .join("")
-        : filteredPayments
+        : allPayments
             .map(
               (payment) => `
               <tr>
-                <td>${payment.occurred_at ? new Date(payment.occurred_at).toLocaleString("pl-PL") : ""}</td>
+                <td>${
+                  payment.occurred_at
+                    ? new Date(payment.occurred_at).toLocaleString("pl-PL")
+                    : ""
+                }</td>
                 <td>${payment.type_name ?? payment.type_id ?? ""}</td>
+                <td>${payment.source === "sale" ? "Sprzedaż" : "Billing Allegro"}</td>
                 <td>${formatMoney(payment.amount, payment.currency ?? "PLN")}</td>
               </tr>
             `
@@ -279,7 +355,11 @@ export default function Home() {
           </style>
         </head>
         <body>
-          <h1>${viewMode === "orders" ? "Lista zamówień Allegro" : "Raport płatności Allegro"}</h1>
+          <h1>${
+            viewMode === "orders"
+              ? "Lista zamówień Allegro"
+              : "Raport płatności Allegro"
+          }</h1>
           <p>Zakres: ${dateFrom || "—"} do ${dateTo || "—"}</p>
 
           <table>
@@ -287,7 +367,7 @@ export default function Home() {
               ${
                 viewMode === "orders"
                   ? `<tr><th>Użytkownik</th><th>Kwota</th><th>Notatka</th></tr>`
-                  : `<tr><th>Data</th><th>Typ operacji</th><th>Kwota</th></tr>`
+                  : `<tr><th>Data</th><th>Typ operacji</th><th>Źródło</th><th>Kwota</th></tr>`
               }
             </thead>
             <tbody>${rows}</tbody>
@@ -314,7 +394,11 @@ export default function Home() {
             </h1>
 
             <p className="mt-1 text-sm text-slate-500">
-              Zamówienia: {orders.length} | Płatności: {payments.length}
+              Zamówienia: {orders.length} | Billing: {payments.length} |
+              Aktualny widok:{" "}
+              {viewMode === "orders"
+                ? filteredOrders.length
+                : allPayments.length}
             </p>
 
             {errorMessage && (
@@ -405,6 +489,16 @@ export default function Home() {
                   </option>
                 ))}
               </select>
+
+              <label className="mt-3 flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={hideCodSales}
+                  onChange={(e) => setHideCodSales(e.target.checked)}
+                  className="h-4 w-4"
+                />
+                Ukryj transakcje za pobraniem
+              </label>
             </div>
           )}
         </div>
@@ -464,7 +558,7 @@ export default function Home() {
               <div className="rounded-2xl bg-white p-5 shadow">
                 <div className="text-sm text-slate-500">Liczba operacji</div>
                 <div className="mt-2 text-3xl font-bold">
-                  {filteredPayments.length}
+                  {allPayments.length}
                 </div>
               </div>
 
@@ -495,18 +589,20 @@ export default function Home() {
                 Sumy wg typu operacji
               </h2>
 
-              {Object.entries(sumsByBillingType).length === 0 ? (
+              {Object.entries(sumsByPaymentType).length === 0 ? (
                 <div className="text-sm text-slate-500">Brak danych</div>
               ) : (
                 <div className="space-y-2">
-                  {Object.entries(sumsByBillingType).map(([type, sum]) => (
+                  {Object.entries(sumsByPaymentType).map(([type, sum]) => (
                     <div
                       key={type}
                       className="flex justify-between border-b pb-2 text-sm"
                     >
                       <span>{type}</span>
                       <strong
-                        className={sum < 0 ? "text-red-700" : "text-green-700"}
+                        className={
+                          sum < 0 ? "text-red-700" : "text-green-700"
+                        }
                       >
                         {sum.toFixed(2)} PLN
                       </strong>
@@ -565,7 +661,10 @@ export default function Home() {
                     <tr key={order.id} className="border-t">
                       <td className="p-3">{order.buyer_login}</td>
                       <td className="p-3">
-                        {formatMoney(order.total_amount, order.currency ?? "PLN")}
+                        {formatMoney(
+                          order.total_amount,
+                          order.currency ?? "PLN"
+                        )}
                       </td>
                       <td className="p-3">
                         <span
@@ -597,11 +696,12 @@ export default function Home() {
               <thead className="bg-slate-200 text-left">
                 <tr>
                   <th className="p-3">Data</th>
+                  <th className="p-3">Źródło</th>
                   <th className="p-3">Typ operacji</th>
                   <th className="p-3">Kwota</th>
                   <th className="p-3">Kierunek</th>
                   <th className="p-3">Saldo</th>
-                  <th className="p-3">Oferta</th>
+                  <th className="p-3">Oferta / kupujący</th>
                   <th className="p-3">Zamówienie</th>
                 </tr>
               </thead>
@@ -609,27 +709,45 @@ export default function Home() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={7} className="p-4 text-slate-500">
+                    <td colSpan={8} className="p-4 text-slate-500">
                       Ładowanie danych...
                     </td>
                   </tr>
-                ) : filteredPayments.length === 0 ? (
+                ) : allPayments.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="p-4 text-slate-500">
+                    <td colSpan={8} className="p-4 text-slate-500">
                       Brak danych.
                     </td>
                   </tr>
                 ) : (
-                  filteredPayments.map((payment) => (
+                  allPayments.map((payment) => (
                     <tr key={payment.id} className="border-t">
                       <td className="p-3">
                         {payment.occurred_at
-                          ? new Date(payment.occurred_at).toLocaleString("pl-PL")
+                          ? new Date(payment.occurred_at).toLocaleString(
+                              "pl-PL"
+                            )
                           : ""}
                       </td>
+
+                      <td className="p-3">
+                        <span
+                          className={
+                            payment.source === "sale"
+                              ? "rounded-full bg-green-100 px-3 py-1 text-green-700"
+                              : "rounded-full bg-slate-100 px-3 py-1 text-slate-700"
+                          }
+                        >
+                          {payment.source === "sale"
+                            ? "Sprzedaż"
+                            : "Billing Allegro"}
+                        </span>
+                      </td>
+
                       <td className="p-3">
                         {payment.type_name || payment.type_id || "Brak danych"}
                       </td>
+
                       <td
                         className={
                           Number(payment.amount ?? 0) < 0
@@ -639,6 +757,7 @@ export default function Home() {
                       >
                         {formatMoney(payment.amount, payment.currency ?? "PLN")}
                       </td>
+
                       <td className="p-3">
                         <span
                           className={
@@ -650,19 +769,24 @@ export default function Home() {
                           {payment.direction || "brak"}
                         </span>
                       </td>
+
                       <td className="p-3">
-                        {formatMoney(
-                          payment.balance_amount,
-                          payment.balance_currency ?? "PLN"
-                        )}
+                        {payment.balance_amount !== null
+                          ? formatMoney(
+                              payment.balance_amount,
+                              payment.balance_currency ?? "PLN"
+                            )
+                          : "—"}
                       </td>
+
                       <td className="p-3">
-                        <div>{payment.offer_id}</div>
+                        <div>{payment.offer_id || "—"}</div>
                         <div className="text-xs text-slate-500">
                           {payment.offer_name}
                         </div>
                       </td>
-                      <td className="p-3">{payment.order_id}</td>
+
+                      <td className="p-3">{payment.order_id || "—"}</td>
                     </tr>
                   ))
                 )}
