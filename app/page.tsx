@@ -31,6 +31,8 @@ type BillingEntry = {
   amount: number | null;
   currency: string | null;
   direction: string | null;
+  category: string | null;
+  transaction_group: string | null;
   balance_amount: number | null;
   balance_currency: string | null;
   offer_id: string | null;
@@ -39,12 +41,21 @@ type BillingEntry = {
 };
 
 type PaymentRow = BillingEntry & {
-  source: "sale" | "billing";
+  source: "billing";
 };
 
 function daysAgo(days: number) {
   const d = new Date();
   d.setDate(d.getDate() - days);
+
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 10);
+}
+
+function yesterday() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
 
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
     .toISOString()
@@ -72,11 +83,25 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
 
-  const [dateFrom, setDateFrom] = useState(daysAgo(30));
-  const [dateTo, setDateTo] = useState(today());
+  const [dateFrom, setDateFrom] = useState(yesterday());
+  const [dateTo, setDateTo] = useState(yesterday());
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [paymentTypeFilter, setPaymentTypeFilter] = useState("ALL");
   const [hideCodSales, setHideCodSales] = useState(false);
+
+function shiftDateRange(days: number) {
+  const shiftDate = (value: string) => {
+    const d = new Date(`${value}T00:00:00`);
+    d.setDate(d.getDate() + days);
+
+    return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+      .toISOString()
+      .slice(0, 10);
+  };
+
+  setDateFrom((current) => (current ? shiftDate(current) : current));
+  setDateTo((current) => (current ? shiftDate(current) : current));
+}
 
   useEffect(() => {
     async function loadData() {
@@ -95,7 +120,7 @@ export default function Home() {
         supabase
           .from("allegro_billing_entries")
           .select(
-            "id,occurred_at,type_id,type_name,amount,currency,direction,balance_amount,balance_currency,offer_id,offer_name,order_id"
+            "id,occurred_at,type_id,type_name,amount,currency,direction,category,transaction_group,balance_amount,balance_currency,offer_id,offer_name,order_id"
           )
           .order("occurred_at", { ascending: false })
           .limit(5000),
@@ -172,7 +197,12 @@ export default function Home() {
 
   const filteredBillingEntries = useMemo(() => {
     return payments.filter((payment) => {
-      const paymentType = payment.type_name || payment.type_id || "";
+      const paymentType =
+        payment.category ||
+        payment.transaction_group ||
+        payment.type_name ||
+        payment.type_id ||
+        "";
 
       if (paymentTypeFilter !== "ALL" && paymentType !== paymentTypeFilter) {
         return false;
@@ -206,30 +236,6 @@ export default function Home() {
     });
   }, [payments, dateFrom, dateTo, paymentTypeFilter, hideCodSales, ordersById]);
 
-  const salesAsPayments = useMemo<PaymentRow[]>(() => {
-    return filteredOrders
-      .filter((order) => order.fulfillment_status !== "Anulowane")
-      .filter((order) => {
-        if (!hideCodSales) return true;
-        return order.payment_kind !== "Pobranie";
-      })
-      .map((order) => ({
-        id: `sale-${order.id}`,
-        occurred_at: order.updated_at,
-        type_id: "SALE",
-        type_name: "Wpływ ze sprzedaży",
-        amount: Number(order.total_amount ?? 0),
-        currency: order.currency ?? "PLN",
-        direction: "plus",
-        balance_amount: null,
-        balance_currency: "PLN",
-        offer_id: null,
-        offer_name: order.buyer_login,
-        order_id: order.id,
-        source: "sale",
-      }));
-  }, [filteredOrders, hideCodSales]);
-
   const billingAsPayments = useMemo<PaymentRow[]>(() => {
     return filteredBillingEntries.map((payment) => ({
       ...payment,
@@ -238,23 +244,29 @@ export default function Home() {
   }, [filteredBillingEntries]);
 
   const allPayments = useMemo<PaymentRow[]>(() => {
-    return [...salesAsPayments, ...billingAsPayments].sort((a, b) => {
+    return [...billingAsPayments].sort((a, b) => {
       const dateA = a.occurred_at ? new Date(a.occurred_at).getTime() : 0;
       const dateB = b.occurred_at ? new Date(b.occurred_at).getTime() : 0;
 
       return dateB - dateA;
     });
-  }, [salesAsPayments, billingAsPayments]);
+  }, [billingAsPayments]);
 
   const paymentTypes = useMemo(() => {
     return Array.from(
       new Set(
-        allPayments
-          .map((p) => p.type_name || p.type_id)
+        payments
+          .map(
+            (p) =>
+              p.category ||
+              p.transaction_group ||
+              p.type_name ||
+              p.type_id
+          )
           .filter((s): s is string => Boolean(s))
       )
     ).sort();
-  }, [allPayments]);
+  }, [payments]);
 
   const activeOrders = filteredOrders.filter(
     (o) => o.fulfillment_status !== "Anulowane"
@@ -294,7 +306,13 @@ export default function Home() {
     const result: Record<string, number> = {};
 
     allPayments.forEach((payment) => {
-      const key = payment.type_name || payment.type_id || "Brak danych";
+      const key =
+        payment.category ||
+        payment.transaction_group ||
+        payment.type_name ||
+        payment.type_id ||
+        "Brak danych";
+
       result[key] = (result[key] || 0) + Number(payment.amount ?? 0);
     });
 
@@ -324,8 +342,8 @@ export default function Home() {
                     ? new Date(payment.occurred_at).toLocaleString("pl-PL")
                     : ""
                 }</td>
-                <td>${payment.type_name ?? payment.type_id ?? ""}</td>
-                <td>${payment.source === "sale" ? "Sprzedaż" : "Billing Allegro"}</td>
+                <td>${payment.category || payment.type_name || payment.type_id || ""}</td>
+                <td>Billing Allegro</td>
                 <td>${formatMoney(payment.amount, payment.currency ?? "PLN")}</td>
               </tr>
             `
@@ -367,7 +385,7 @@ export default function Home() {
               ${
                 viewMode === "orders"
                   ? `<tr><th>Użytkownik</th><th>Kwota</th><th>Notatka</th></tr>`
-                  : `<tr><th>Data</th><th>Typ operacji</th><th>Źródło</th><th>Kwota</th></tr>`
+                  : `<tr><th>Data</th><th>Kategoria</th><th>Źródło</th><th>Kwota</th></tr>`
               }
             </thead>
             <tbody>${rows}</tbody>
@@ -396,9 +414,7 @@ export default function Home() {
             <p className="mt-1 text-sm text-slate-500">
               Zamówienia: {orders.length} | Billing: {payments.length} |
               Aktualny widok:{" "}
-              {viewMode === "orders"
-                ? filteredOrders.length
-                : allPayments.length}
+              {viewMode === "orders" ? filteredOrders.length : allPayments.length}
             </p>
 
             {errorMessage && (
@@ -454,6 +470,24 @@ export default function Home() {
             />
           </div>
 
+          <div className="flex items-end gap-2">
+  <button
+    type="button"
+    onClick={() => shiftDateRange(-1)}
+    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100"
+  >
+    ← Dzień
+  </button>
+
+  <button
+    type="button"
+    onClick={() => shiftDateRange(1)}
+    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100"
+  >
+    Dzień →
+  </button>
+</div>
+
           {viewMode === "orders" ? (
             <div>
               <label className="block text-sm text-slate-600">
@@ -475,7 +509,7 @@ export default function Home() {
           ) : (
             <div>
               <label className="block text-sm text-slate-600">
-                Typ operacji
+                Kategoria operacji
               </label>
               <select
                 value={paymentTypeFilter}
@@ -497,7 +531,7 @@ export default function Home() {
                   onChange={(e) => setHideCodSales(e.target.checked)}
                   className="h-4 w-4"
                 />
-                Ukryj transakcje za pobraniem
+                Ukryj operacje zamówień za pobraniem
               </label>
             </div>
           )}
@@ -524,9 +558,7 @@ export default function Home() {
 
               <div className="rounded-2xl bg-white p-5 shadow">
                 <div className="text-sm text-slate-500">Anulowane</div>
-                <div className="mt-2 text-3xl font-bold">
-                  {cancelledCount}
-                </div>
+                <div className="mt-2 text-3xl font-bold">{cancelledCount}</div>
               </div>
             </section>
 
@@ -563,21 +595,21 @@ export default function Home() {
               </div>
 
               <div className="rounded-2xl bg-white p-5 shadow">
-                <div className="text-sm text-slate-500">Plus</div>
+                <div className="text-sm text-slate-500">Wpływy</div>
                 <div className="mt-2 text-3xl font-bold text-green-700">
                   {paymentsPlus.toFixed(2)} PLN
                 </div>
               </div>
 
               <div className="rounded-2xl bg-white p-5 shadow">
-                <div className="text-sm text-slate-500">Minus</div>
+                <div className="text-sm text-slate-500">Koszty</div>
                 <div className="mt-2 text-3xl font-bold text-red-700">
                   {paymentsMinus.toFixed(2)} PLN
                 </div>
               </div>
 
               <div className="rounded-2xl bg-white p-5 shadow">
-                <div className="text-sm text-slate-500">Netto</div>
+                <div className="text-sm text-slate-500">Saldo</div>
                 <div className="mt-2 text-3xl font-bold">
                   {paymentsNet.toFixed(2)} PLN
                 </div>
@@ -586,7 +618,7 @@ export default function Home() {
 
             <section className="mb-6 rounded-2xl bg-white p-5 shadow">
               <h2 className="mb-4 text-lg font-semibold text-slate-900">
-                Sumy wg typu operacji
+                Sumy wg kategorii
               </h2>
 
               {Object.entries(sumsByPaymentType).length === 0 ? (
@@ -697,11 +729,12 @@ export default function Home() {
                 <tr>
                   <th className="p-3">Data</th>
                   <th className="p-3">Źródło</th>
-                  <th className="p-3">Typ operacji</th>
+                  <th className="p-3">Kategoria</th>
+                  <th className="p-3">Typ Allegro</th>
                   <th className="p-3">Kwota</th>
                   <th className="p-3">Kierunek</th>
                   <th className="p-3">Saldo</th>
-                  <th className="p-3">Oferta / kupujący</th>
+                  <th className="p-3">Oferta</th>
                   <th className="p-3">Zamówienie</th>
                 </tr>
               </thead>
@@ -709,13 +742,13 @@ export default function Home() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={8} className="p-4 text-slate-500">
+                    <td colSpan={9} className="p-4 text-slate-500">
                       Ładowanie danych...
                     </td>
                   </tr>
                 ) : allPayments.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="p-4 text-slate-500">
+                    <td colSpan={9} className="p-4 text-slate-500">
                       Brak danych.
                     </td>
                   </tr>
@@ -731,21 +764,22 @@ export default function Home() {
                       </td>
 
                       <td className="p-3">
-                        <span
-                          className={
-                            payment.source === "sale"
-                              ? "rounded-full bg-green-100 px-3 py-1 text-green-700"
-                              : "rounded-full bg-slate-100 px-3 py-1 text-slate-700"
-                          }
-                        >
-                          {payment.source === "sale"
-                            ? "Sprzedaż"
-                            : "Billing Allegro"}
+                        <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">
+                          Billing Allegro
                         </span>
                       </td>
 
-                      <td className="p-3">
-                        {payment.type_name || payment.type_id || "Brak danych"}
+                      <td className="p-3 font-medium">
+                        {payment.category ||
+                          payment.transaction_group ||
+                          "Brak kategorii"}
+                      </td>
+
+                      <td className="p-3 text-slate-600">
+                        <div>{payment.type_name || payment.type_id || "Brak danych"}</div>
+                        <div className="text-xs text-slate-400">
+                          {payment.type_id}
+                        </div>
                       </td>
 
                       <td
