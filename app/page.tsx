@@ -41,29 +41,15 @@ type BillingEntry = {
 };
 
 type PaymentRow = BillingEntry & {
-  source: "billing";
+  source: "billing" | "order";
+  buyer_login?: string | null;
+  payment_kind?: string | null;
+  fulfillment_status?: string | null;
 };
-
-function daysAgo(days: number) {
-  const d = new Date();
-  d.setDate(d.getDate() - days);
-
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
-    .toISOString()
-    .slice(0, 10);
-}
 
 function yesterday() {
   const d = new Date();
   d.setDate(d.getDate() - 1);
-
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
-    .toISOString()
-    .slice(0, 10);
-}
-
-function today() {
-  const d = new Date();
 
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
     .toISOString()
@@ -87,21 +73,25 @@ export default function Home() {
   const [dateTo, setDateTo] = useState(yesterday());
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [paymentTypeFilter, setPaymentTypeFilter] = useState("ALL");
+
   const [hideCodSales, setHideCodSales] = useState(false);
+  const [hideSales, setHideSales] = useState(false);
+  const [hideFeeCollectionFromIncome, setHideFeeCollectionFromIncome] =
+    useState(false);
 
-function shiftDateRange(days: number) {
-  const shiftDate = (value: string) => {
-    const d = new Date(`${value}T00:00:00`);
-    d.setDate(d.getDate() + days);
+  function shiftDateRange(days: number) {
+    const shiftDate = (value: string) => {
+      const d = new Date(`${value}T00:00:00`);
+      d.setDate(d.getDate() + days);
 
-    return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
-      .toISOString()
-      .slice(0, 10);
-  };
+      return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+        .toISOString()
+        .slice(0, 10);
+    };
 
-  setDateFrom((current) => (current ? shiftDate(current) : current));
-  setDateTo((current) => (current ? shiftDate(current) : current));
-}
+    setDateFrom((current) => (current ? shiftDate(current) : current));
+    setDateTo((current) => (current ? shiftDate(current) : current));
+  }
 
   useEffect(() => {
     async function loadData() {
@@ -208,6 +198,22 @@ function shiftDateRange(days: number) {
         return false;
       }
 
+      if (hideFeeCollectionFromIncome) {
+        const combinedText = [
+          payment.category,
+          payment.transaction_group,
+          payment.type_name,
+          payment.type_id,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        if (combinedText.includes("pobranie opłat z wpływów")) {
+          return false;
+        }
+      }
+
       if (hideCodSales && payment.order_id) {
         const relatedOrder = ordersById[payment.order_id];
 
@@ -234,7 +240,15 @@ function shiftDateRange(days: number) {
 
       return true;
     });
-  }, [payments, dateFrom, dateTo, paymentTypeFilter, hideCodSales, ordersById]);
+  }, [
+    payments,
+    dateFrom,
+    dateTo,
+    paymentTypeFilter,
+    hideCodSales,
+    hideFeeCollectionFromIncome,
+    ordersById,
+  ]);
 
   const billingAsPayments = useMemo<PaymentRow[]>(() => {
     return filteredBillingEntries.map((payment) => ({
@@ -243,14 +257,69 @@ function shiftDateRange(days: number) {
     }));
   }, [filteredBillingEntries]);
 
+  const orderSalesAsPayments = useMemo<PaymentRow[]>(() => {
+    return orders
+      .filter((order) => {
+        if (order.fulfillment_status === "Anulowane") return false;
+
+        if (hideCodSales && order.payment_kind === "Pobranie") {
+          return false;
+        }
+
+        if (dateFrom || dateTo) {
+          if (!order.updated_at) return false;
+
+          const orderDate = new Date(order.updated_at).getTime();
+
+          if (dateFrom) {
+            const from = new Date(`${dateFrom}T00:00:00`).getTime();
+            if (orderDate < from) return false;
+          }
+
+          if (dateTo) {
+            const to = new Date(`${dateTo}T23:59:59`).getTime();
+            if (orderDate > to) return false;
+          }
+        }
+
+        return true;
+      })
+      .map((order) => ({
+        id: `order-${order.id}`,
+        occurred_at: order.updated_at,
+        type_id: "ORDER_SALE",
+        type_name: "Sprzedaż z zamówienia",
+        amount: Number(order.total_amount ?? 0),
+        currency: order.currency ?? "PLN",
+        direction: "income",
+        category: "Przychód ze sprzedaży",
+        transaction_group: "Sprzedaż",
+        balance_amount: null,
+        balance_currency: null,
+        offer_id: null,
+        offer_name: null,
+        order_id: order.id,
+        source: "order",
+        buyer_login: order.buyer_login,
+        payment_kind: order.payment_kind,
+        fulfillment_status: order.fulfillment_status,
+      }));
+  }, [orders, dateFrom, dateTo, hideCodSales]);
+
   const allPayments = useMemo<PaymentRow[]>(() => {
-    return [...billingAsPayments].sort((a, b) => {
+    let combined = [...orderSalesAsPayments, ...billingAsPayments];
+
+    if (hideSales) {
+      combined = combined.filter((payment) => payment.source !== "order");
+    }
+
+    return combined.sort((a, b) => {
       const dateA = a.occurred_at ? new Date(a.occurred_at).getTime() : 0;
       const dateB = b.occurred_at ? new Date(b.occurred_at).getTime() : 0;
 
       return dateB - dateA;
     });
-  }, [billingAsPayments]);
+  }, [orderSalesAsPayments, billingAsPayments, hideSales]);
 
   const paymentTypes = useMemo(() => {
     return Array.from(
@@ -343,7 +412,7 @@ function shiftDateRange(days: number) {
                     : ""
                 }</td>
                 <td>${payment.category || payment.type_name || payment.type_id || ""}</td>
-                <td>Billing Allegro</td>
+                <td>${payment.source === "order" ? "Zamówienie" : "Billing Allegro"}</td>
                 <td>${formatMoney(payment.amount, payment.currency ?? "PLN")}</td>
               </tr>
             `
@@ -471,22 +540,22 @@ function shiftDateRange(days: number) {
           </div>
 
           <div className="flex items-end gap-2">
-  <button
-    type="button"
-    onClick={() => shiftDateRange(-1)}
-    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100"
-  >
-    ← Dzień
-  </button>
+            <button
+              type="button"
+              onClick={() => shiftDateRange(-1)}
+              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100"
+            >
+              ← Dzień
+            </button>
 
-  <button
-    type="button"
-    onClick={() => shiftDateRange(1)}
-    className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100"
-  >
-    Dzień →
-  </button>
-</div>
+            <button
+              type="button"
+              onClick={() => shiftDateRange(1)}
+              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100"
+            >
+              Dzień →
+            </button>
+          </div>
 
           {viewMode === "orders" ? (
             <div>
@@ -525,6 +594,28 @@ function shiftDateRange(days: number) {
               </select>
 
               <label className="mt-3 flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={hideSales}
+                  onChange={(e) => setHideSales(e.target.checked)}
+                  className="h-4 w-4"
+                />
+                Ukryj przychody ze sprzedaży
+              </label>
+
+              <label className="mt-2 flex items-center gap-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={hideFeeCollectionFromIncome}
+                  onChange={(e) =>
+                    setHideFeeCollectionFromIncome(e.target.checked)
+                  }
+                  className="h-4 w-4"
+                />
+                Ukryj Pobranie opłat z wpływów
+              </label>
+
+              <label className="mt-2 flex items-center gap-2 text-sm text-slate-700">
                 <input
                   type="checkbox"
                   checked={hideCodSales}
@@ -765,7 +856,9 @@ function shiftDateRange(days: number) {
 
                       <td className="p-3">
                         <span className="rounded-full bg-slate-100 px-3 py-1 text-slate-700">
-                          Billing Allegro
+                          {payment.source === "order"
+                            ? "Zamówienie"
+                            : "Billing Allegro"}
                         </span>
                       </td>
 
@@ -776,7 +869,9 @@ function shiftDateRange(days: number) {
                       </td>
 
                       <td className="p-3 text-slate-600">
-                        <div>{payment.type_name || payment.type_id || "Brak danych"}</div>
+                        <div>
+                          {payment.type_name || payment.type_id || "Brak danych"}
+                        </div>
                         <div className="text-xs text-slate-400">
                           {payment.type_id}
                         </div>
