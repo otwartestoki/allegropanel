@@ -61,6 +61,76 @@ function formatMoney(value: number | null | undefined, currency = "PLN") {
   return `${Number(value ?? 0).toFixed(2)} ${currency}`;
 }
 
+function parseCsvAmount(value: string | null | undefined) {
+  const rawValue = String(value ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/zł|pln/gi, "")
+    .trim();
+
+  const normalizedValue = rawValue
+    .replace(/\s/g, "")
+    .replace(/,/g, ".")
+    .replace(/[^0-9.-]/g, "");
+
+  const amount = Number(normalizedValue);
+
+  return Number.isFinite(amount) ? amount : 0;
+}
+
+function calculateCsvSummary(headers: string[], rows: string[][]) {
+  if (!headers.length || !rows.length) return null;
+
+  const normalizedHeaders = headers.map((header) =>
+    header
+      .replace(/^\uFEFF/, "")
+      .trim()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+  );
+
+  let amountIndex = normalizedHeaders.findIndex((header) =>
+    ["kwota", "wartosc", "amount", "value"].includes(header)
+  );
+
+  if (amountIndex === -1) {
+    amountIndex = normalizedHeaders.findIndex(
+      (header) => header.includes("kwot") || header.includes("wartosc")
+    );
+  }
+
+  if (amountIndex === -1) {
+    const columnScores = headers.map((_, columnIndex) =>
+      rows.reduce((score, row) => {
+        const value = parseCsvAmount(row[columnIndex]);
+        return score + (value !== 0 ? 1 : 0);
+      }, 0)
+    );
+
+    amountIndex = columnScores.indexOf(Math.max(...columnScores));
+  }
+
+  const values = rows.map((row) => parseCsvAmount(row[amountIndex]));
+  const firstTransferAmount = values[0] ?? 0;
+  const remainingValues = values.slice(1);
+  const plusSum = remainingValues
+    .filter((value) => value > 0)
+    .reduce((sum, value) => sum + value, 0);
+  const minusSum = remainingValues
+    .filter((value) => value < 0)
+    .reduce((sum, value) => sum + value, 0);
+  const total = values.reduce((sum, value) => sum + value, 0);
+
+  return {
+    amountIndex,
+    firstTransferAmount,
+    plusSum,
+    minusSum,
+    total,
+    isBalanced: Math.abs(total) < 0.01,
+  };
+}
+
 export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>("orders");
 
@@ -85,6 +155,11 @@ export default function Home() {
   const [csvPreviewHeaders, setCsvPreviewHeaders] = useState<string[]>([]);
   const [csvPreviewRows, setCsvPreviewRows] = useState<string[][]>([]);
   const [csvDownloadName, setCsvDownloadName] = useState("raport_z_paragonami.csv");
+
+  const csvSummary = useMemo(
+    () => calculateCsvSummary(csvPreviewHeaders, csvPreviewRows),
+    [csvPreviewHeaders, csvPreviewRows]
+  );
 
   function normalizeHeader(value: string) {
     return value
@@ -1091,6 +1166,53 @@ export default function Home() {
           <p className="mt-3 rounded-xl bg-slate-100 p-3 text-sm text-slate-700">
             {csvProcessing ? "Przetwarzanie CSV..." : csvInfo}
           </p>
+
+
+
+          {csvSummary && (
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <p className="text-xs font-medium text-slate-500">Kwota przelewu z 1. wiersza</p>
+                <p className="mt-1 text-lg font-semibold text-slate-900">
+                  {formatMoney(csvSummary.firstTransferAmount)}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                <p className="text-xs font-medium text-emerald-700">Suma plusów</p>
+                <p className="mt-1 text-lg font-semibold text-emerald-900">
+                  {formatMoney(csvSummary.plusSum)}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-red-200 bg-red-50 p-3">
+                <p className="text-xs font-medium text-red-700">Suma minusów</p>
+                <p className="mt-1 text-lg font-semibold text-red-900">
+                  {formatMoney(csvSummary.minusSum)}
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <p className="text-xs font-medium text-slate-500">Suma wszystkich wartości</p>
+                <p className="mt-1 text-lg font-semibold text-slate-900">
+                  {formatMoney(csvSummary.total)}
+                </p>
+              </div>
+
+              <div
+                className={`rounded-xl border p-3 ${
+                  csvSummary.isBalanced
+                    ? "border-emerald-200 bg-emerald-50"
+                    : "border-amber-200 bg-amber-50"
+                }`}
+              >
+                <p className="text-xs font-medium text-slate-600">Kontrola bilansu</p>
+                <p className="mt-1 text-lg font-semibold text-slate-900">
+                  {csvSummary.isBalanced ? "OK — suma 0" : "Niezgodne"}
+                </p>
+              </div>
+            </div>
+          )}
 
           {csvPreviewRows.length > 0 && (
             <div className="mt-5">
