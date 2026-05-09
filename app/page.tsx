@@ -48,6 +48,18 @@ type PaymentRow = BillingEntry & {
   fulfillment_status?: string | null;
 };
 
+type CsvSummary = NonNullable<ReturnType<typeof calculateCsvSummary>>;
+
+type CsvProcessedFile = {
+  fileName: string;
+  downloadName: string;
+  headers: string[];
+  rows: string[][];
+  rowCount: number;
+  addedReceipts: number;
+  summary: CsvSummary | null;
+};
+
 function yesterday() {
   const d = new Date();
   d.setDate(d.getDate() - 1);
@@ -151,15 +163,59 @@ export default function Home() {
     useState(false);
 
   const [csvProcessing, setCsvProcessing] = useState(false);
-  const [csvInfo, setCsvInfo] = useState("Wczytaj plik CSV z Allegro.");
-  const [csvPreviewHeaders, setCsvPreviewHeaders] = useState<string[]>([]);
-  const [csvPreviewRows, setCsvPreviewRows] = useState<string[][]>([]);
-  const [csvDownloadName, setCsvDownloadName] = useState("raport_z_paragonami.csv");
+  const [csvInfo, setCsvInfo] = useState("Wczytaj jeden albo kilka plików CSV z Allegro.");
+  const [csvProcessedFiles, setCsvProcessedFiles] = useState<CsvProcessedFile[]>([]);
 
-  const csvSummary = useMemo(
-    () => calculateCsvSummary(csvPreviewHeaders, csvPreviewRows),
-    [csvPreviewHeaders, csvPreviewRows]
-  );
+  const csvPreviewHeaders = useMemo(() => {
+    if (csvProcessedFiles.length === 0) return [];
+
+    const baseHeaders = csvProcessedFiles[0].headers;
+    return csvProcessedFiles.length > 1 ? ["plik", ...baseHeaders] : baseHeaders;
+  }, [csvProcessedFiles]);
+
+  const csvPreviewRows = useMemo(() => {
+    if (csvProcessedFiles.length === 0) return [];
+
+    if (csvProcessedFiles.length === 1) {
+      return csvProcessedFiles[0].rows;
+    }
+
+    return csvProcessedFiles.flatMap((file) =>
+      file.rows.map((row) => [file.fileName, ...row])
+    );
+  }, [csvProcessedFiles]);
+
+  const csvDownloadName = useMemo(() => {
+    if (csvProcessedFiles.length === 1) return csvProcessedFiles[0].downloadName;
+    return "raport_z_paragonami_zbiorczy.csv";
+  }, [csvProcessedFiles]);
+
+  const csvSummary = useMemo(() => {
+    if (csvProcessedFiles.length === 0) return null;
+
+    const summaries = csvProcessedFiles
+      .map((file) => file.summary)
+      .filter((summary): summary is CsvSummary => Boolean(summary));
+
+    if (summaries.length === 0) return null;
+
+    const firstTransferAmount = summaries.reduce(
+      (sum, summary) => sum + summary.firstTransferAmount,
+      0
+    );
+    const plusSum = summaries.reduce((sum, summary) => sum + summary.plusSum, 0);
+    const minusSum = summaries.reduce((sum, summary) => sum + summary.minusSum, 0);
+    const total = summaries.reduce((sum, summary) => sum + summary.total, 0);
+
+    return {
+      amountIndex: summaries[0].amountIndex,
+      firstTransferAmount,
+      plusSum,
+      minusSum,
+      total,
+      isBalanced: Math.abs(total) < 0.01,
+    };
+  }, [csvProcessedFiles]);
 
   function normalizeHeader(value: string) {
     return value
@@ -362,99 +418,148 @@ export default function Home() {
     return chunks;
   }
 
-  async function handleCsvWithReceipts(file: File) {
+  async function processSingleCsvFile(file: File): Promise<CsvProcessedFile> {
+    const text = await file.text();
+    const rows = parseCsv(text);
+
+    if (rows.length < 2) {
+      throw new Error(`Plik ${file.name} nie ma danych albo zawiera tylko nagłówek.`);
+    }
+
+    const headers = rows[0];
+    const dataRows = rows.slice(1);
+    const identifierIndex = headers.findIndex(
+      (header) => normalizeHeader(header) === "identyfikator"
+    );
+
+    if (identifierIndex === -1) {
+      throw new Error(
+        `W pliku ${file.name} nie znaleziono kolumny 'identyfikator'. Wykryte kolumny: ${headers.join(", ")}`
+      );
+    }
+
+    const identifiers = Array.from(
+      new Set(
+        dataRows
+          .map((row) => (row[identifierIndex] || "").trim())
+          .filter(Boolean)
+      )
+    );
+
+    if (identifiers.length === 0) {
+      throw new Error(`W pliku ${file.name} kolumna 'identyfikator' jest pusta.`);
+    }
+
+    const ordersByPaymentId: Record<
+      string,
+      { id: string; payment_id: string | null; seller_note: string | null }
+    > = {};
+
+    for (const chunk of chunkArray(identifiers, 300)) {
+      const { data, error } = await supabase
+        .from("allegro_orders")
+        .select("id,payment_id,seller_note")
+        .in("payment_id", chunk);
+
+      if (error) {
+        throw error;
+      }
+
+      (data ?? []).forEach((order) => {
+        if (order.payment_id) {
+          ordersByPaymentId[order.payment_id] = order;
+        }
+      });
+    }
+
+    let addedReceipts = 0;
+    const outputHeaders = [...headers, "numer_paragonu"];
+    const outputRows = dataRows.map((row) => {
+      const identifier = (row[identifierIndex] || "").trim();
+      const order = ordersByPaymentId[identifier];
+      const sellerNote = order?.seller_note?.trim() || "";
+
+      if (sellerNote) {
+        addedReceipts += 1;
+      }
+
+      return [...row, sellerNote];
+    });
+
+    const baseName = file.name.replace(/\.csv$/i, "");
+
+    return {
+      fileName: file.name,
+      downloadName: `${baseName}_z_paragonami.csv`,
+      headers: outputHeaders,
+      rows: outputRows,
+      rowCount: dataRows.length,
+      addedReceipts,
+      summary: calculateCsvSummary(outputHeaders, outputRows),
+    };
+  }
+
+  async function handleCsvWithReceipts(files: FileList | File[]) {
+    const selectedFiles = Array.from(files).filter((file) =>
+      file.name.toLowerCase().endsWith(".csv") || file.type.includes("csv")
+    );
+
+    if (selectedFiles.length === 0) {
+      setCsvInfo("Wybierz co najmniej jeden plik CSV.");
+      return;
+    }
+
     setCsvProcessing(true);
-    setCsvPreviewHeaders([]);
-    setCsvPreviewRows([]);
-    setCsvInfo("Przetwarzam plik CSV...");
+    setCsvProcessedFiles([]);
+    setCsvInfo(
+      selectedFiles.length === 1
+        ? "Przetwarzam plik CSV..."
+        : `Przetwarzam pliki CSV: 0/${selectedFiles.length}...`
+    );
 
     try {
-      const text = await file.text();
-      const rows = parseCsv(text);
+      const processedFiles: CsvProcessedFile[] = [];
 
-      if (rows.length < 2) {
-        setCsvInfo("CSV nie ma danych albo zawiera tylko nagłówek.");
-        return;
-      }
-
-      const headers = rows[0];
-      const dataRows = rows.slice(1);
-      const identifierIndex = headers.findIndex(
-        (header) => normalizeHeader(header) === "identyfikator"
-      );
-
-      if (identifierIndex === -1) {
+      for (const [index, file] of selectedFiles.entries()) {
         setCsvInfo(
-          `Nie znaleziono kolumny 'identyfikator'. Wykryte kolumny: ${headers.join(", ")}`
+          selectedFiles.length === 1
+            ? `Przetwarzam plik CSV: ${file.name}...`
+            : `Przetwarzam pliki CSV: ${index + 1}/${selectedFiles.length} — ${file.name}`
         );
-        return;
+
+        processedFiles.push(await processSingleCsvFile(file));
       }
 
-      const identifiers = Array.from(
-        new Set(
-          dataRows
-            .map((row) => (row[identifierIndex] || "").trim())
-            .filter(Boolean)
-        )
+      setCsvProcessedFiles(processedFiles);
+
+      const totalRows = processedFiles.reduce((sum, file) => sum + file.rowCount, 0);
+      const totalReceipts = processedFiles.reduce(
+        (sum, file) => sum + file.addedReceipts,
+        0
       );
+      const combinedHeaders =
+        processedFiles.length > 1
+          ? ["plik", ...processedFiles[0].headers]
+          : processedFiles[0].headers;
+      const combinedRows =
+        processedFiles.length > 1
+          ? processedFiles.flatMap((file) =>
+              file.rows.map((row) => [file.fileName, ...row])
+            )
+          : processedFiles[0].rows;
+      const combinedFilename =
+        processedFiles.length === 1
+          ? processedFiles[0].downloadName
+          : "raport_z_paragonami_zbiorczy.csv";
 
-      if (identifiers.length === 0) {
-        setCsvInfo("Kolumna 'identyfikator' jest pusta.");
-        return;
-      }
-
-      const ordersByPaymentId: Record<
-        string,
-        { id: string; payment_id: string | null; seller_note: string | null }
-      > = {};
-
-      for (const chunk of chunkArray(identifiers, 300)) {
-        const { data, error } = await supabase
-          .from("allegro_orders")
-          .select("id,payment_id,seller_note")
-          .in("payment_id", chunk);
-
-        if (error) {
-          throw error;
-        }
-
-        (data ?? []).forEach((order) => {
-          if (order.payment_id) {
-            ordersByPaymentId[order.payment_id] = order;
-          }
-        });
-      }
-
-      let addedReceipts = 0;
-
-      const outputRows = [
-        [...headers, "numer_paragonu"],
-        ...dataRows.map((row) => {
-          const identifier = (row[identifierIndex] || "").trim();
-          const order = ordersByPaymentId[identifier];
-          const sellerNote = order?.seller_note?.trim() || "";
-
-          if (sellerNote) {
-            addedReceipts += 1;
-          }
-
-          return [...row, sellerNote];
-        }),
-      ];
-
-      const baseName = file.name.replace(/\.csv$/i, "");
-      const outputFilename = `${baseName}_z_paragonami.csv`;
-
-      setCsvPreviewHeaders(outputRows[0]);
-      setCsvPreviewRows(outputRows.slice(1));
-      setCsvDownloadName(outputFilename);
-      downloadCsv(outputFilename, outputRows);
+      downloadCsv(combinedFilename, [combinedHeaders, ...combinedRows]);
 
       setCsvInfo(
-        `Gotowe. Wiersze CSV: ${dataRows.length}. Dopisane paragony: ${addedReceipts}.`
+        `Gotowe. Pliki: ${processedFiles.length}. Wiersze CSV: ${totalRows}. Dopisane paragony: ${totalReceipts}.`
       );
     } catch (error) {
       console.error(error);
+      setCsvProcessedFiles([]);
       setCsvInfo(
         error instanceof Error
           ? `Błąd przetwarzania CSV: ${error.message}`
@@ -1150,12 +1255,13 @@ export default function Home() {
           <input
             type="file"
             accept=".csv,text/csv"
+            multiple
             disabled={csvProcessing}
             onChange={(event) => {
-              const file = event.target.files?.[0];
+              const files = event.target.files;
 
-              if (file) {
-                handleCsvWithReceipts(file);
+              if (files?.length) {
+                handleCsvWithReceipts(files);
               }
 
               event.target.value = "";
@@ -1172,7 +1278,11 @@ export default function Home() {
           {csvSummary && (
             <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <div className="rounded-xl border border-slate-200 bg-white p-3">
-                <p className="text-xs font-medium text-slate-500">Kwota przelewu z 1. wiersza</p>
+                <p className="text-xs font-medium text-slate-500">
+                  {csvProcessedFiles.length > 1
+                    ? "Suma przelewów z 1. wierszy"
+                    : "Kwota przelewu z 1. wiersza"}
+                </p>
                 <p className="mt-1 text-lg font-semibold text-slate-900">
                   {formatMoney(csvSummary.firstTransferAmount)}
                 </p>
@@ -1214,6 +1324,58 @@ export default function Home() {
             </div>
           )}
 
+          {csvProcessedFiles.length > 1 && (
+            <div className="mt-5 rounded-2xl border border-slate-200 overflow-hidden">
+              <div className="bg-slate-100 px-4 py-3">
+                <h3 className="text-base font-semibold text-slate-900">
+                  Podsumowanie poszczególnych plików
+                </h3>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-xs">
+                  <thead className="bg-slate-200 text-left">
+                    <tr>
+                      <th className="p-3">Plik</th>
+                      <th className="p-3">Wiersze</th>
+                      <th className="p-3">Paragony</th>
+                      <th className="p-3">Przelew z 1. wiersza</th>
+                      <th className="p-3">Suma plusów</th>
+                      <th className="p-3">Suma minusów</th>
+                      <th className="p-3">Suma</th>
+                      <th className="p-3">Bilans</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {csvProcessedFiles.map((file) => (
+                      <tr key={file.fileName} className="border-t">
+                        <td className="p-3 font-medium">{file.fileName}</td>
+                        <td className="p-3">{file.rowCount}</td>
+                        <td className="p-3">{file.addedReceipts}</td>
+                        <td className="p-3">
+                          {formatMoney(file.summary?.firstTransferAmount ?? 0)}
+                        </td>
+                        <td className="p-3 text-emerald-700">
+                          {formatMoney(file.summary?.plusSum ?? 0)}
+                        </td>
+                        <td className="p-3 text-red-700">
+                          {formatMoney(file.summary?.minusSum ?? 0)}
+                        </td>
+                        <td className="p-3">
+                          {formatMoney(file.summary?.total ?? 0)}
+                        </td>
+                        <td className="p-3">
+                          {file.summary?.isBalanced ? "OK" : "Niezgodne"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           {csvPreviewRows.length > 0 && (
             <div className="mt-5">
               <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -1222,7 +1384,7 @@ export default function Home() {
                     Podgląd CSV z paragonami
                   </h3>
                   <p className="text-sm text-slate-500">
-                    Wiersze: {csvPreviewRows.length} | Plik: {csvDownloadName}
+                    Pliki: {csvProcessedFiles.length} | Wiersze: {csvPreviewRows.length} | Plik: {csvDownloadName}
                   </p>
                 </div>
 
