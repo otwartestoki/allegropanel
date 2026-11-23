@@ -9,15 +9,22 @@ export function middleware(request: NextRequest) {
   const password = process.env.BASIC_AUTH_PASSWORD;
 
   if (!username || !password) {
-    return NextResponse.next();
+    return new NextResponse("Brak konfiguracji dostępu.", { status: 503 });
   }
 
-  if (basicAuth) {
+  if (basicAuth?.startsWith("Basic ")) {
+    try {
     const authValue = basicAuth.split(" ")[1];
-    const [user, pass] = atob(authValue).split(":");
+    const decoded = atob(authValue);
+    const separator = decoded.indexOf(":");
+    const user = decoded.slice(0, separator);
+    const pass = decoded.slice(separator + 1);
 
     if (user === username && pass === password) {
       return NextResponse.next();
+    }
+    } catch {
+      // Malformed credentials receive the same authentication challenge.
     }
   }
 

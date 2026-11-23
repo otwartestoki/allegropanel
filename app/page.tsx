@@ -4,8 +4,16 @@ import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  typeof window === "undefined" ? "http://localhost" : window.location.origin,
+  "local-panel",
+  { db: { schema: "public" }, global: { fetch: (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    url.pathname = url.pathname.replace(/^\/rest\/v1\//, "/api/data/");
+    const headers = new Headers(init?.headers);
+    headers.delete("authorization");
+    headers.delete("apikey");
+    return fetch(url, { ...init, headers, credentials: "same-origin" });
+  } } }
 );
 
 type ViewMode = "orders" | "payments" | "csv";
