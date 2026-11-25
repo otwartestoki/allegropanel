@@ -996,19 +996,6 @@ export default function Home() {
             <h1 className="text-3xl font-bold text-slate-900">
               Panel Allegro
             </h1>
-            {lastUpdated && (
-              <p className="mt-1 text-xs text-slate-400">
-                Ostatnia aktualizacja danych{" "}
-                <time dateTime={lastUpdated} title="Ostatni udany import zamówień i rozliczeń, czas polski">
-                  {new Date(lastUpdated).toLocaleString("pl-PL", {
-                    timeZone: "Europe/Warsaw",
-                    day: "2-digit", month: "2-digit", year: "numeric",
-                    hour: "2-digit", minute: "2-digit",
-                  })}
-                </time>
-              </p>
-            )}
-
             <p className="mt-1 text-sm text-slate-500">
               Zamówienia: {orders.length} | Billing: {payments.length} |
               Aktualny widok:{" "}
@@ -1017,6 +1004,18 @@ export default function Home() {
                 : viewMode === "payments"
                   ? allPayments.length
                   : csvPreviewRows.length}
+              {lastUpdated && (
+                <>
+                  {" | Aktualizacja: "}
+                  <time dateTime={lastUpdated} title="Ostatni udany import zamówień i rozliczeń, czas polski">
+                    {new Date(lastUpdated).toLocaleString("pl-PL", {
+                      timeZone: "Europe/Warsaw",
+                      day: "2-digit", month: "2-digit", year: "numeric",
+                      hour: "2-digit", minute: "2-digit",
+                    })}
+                  </time>
+                </>
+              )}
             </p>
 
             {errorMessage && (
