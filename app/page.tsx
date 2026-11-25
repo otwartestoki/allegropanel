@@ -159,6 +159,7 @@ export default function Home() {
 
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   const [dateFrom, setDateFrom] = useState(yesterday());
   const [dateTo, setDateTo] = useState(yesterday());
@@ -633,6 +634,23 @@ export default function Home() {
     }
 
     loadData();
+    async function loadUpdateTime() {
+      try {
+        const response = await fetch("/api/data/allegro_sync_state?select=table_name,completed_at", {
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+        if (!response.ok) return;
+        const rows: { table_name: string; completed_at: string }[] = await response.json();
+        const times = ["allegro_orders", "allegro_billing_entries"].map(table =>
+          Date.parse(rows.find(row => row.table_name === table)?.completed_at ?? "")
+        );
+        if (times.every(Number.isFinite)) setLastUpdated(new Date(Math.min(...times)).toISOString());
+      } catch {
+        // The table views remain usable when import metadata is unavailable.
+      }
+    }
+    loadUpdateTime();
   }, []);
 
   const statuses = useMemo(() => {
@@ -978,6 +996,18 @@ export default function Home() {
             <h1 className="text-3xl font-bold text-slate-900">
               Panel Allegro
             </h1>
+            {lastUpdated && (
+              <p className="mt-1 text-xs text-slate-400">
+                Ostatnia aktualizacja danych{" "}
+                <time dateTime={lastUpdated} title="Ostatni udany import zamówień i rozliczeń, czas polski">
+                  {new Date(lastUpdated).toLocaleString("pl-PL", {
+                    timeZone: "Europe/Warsaw",
+                    day: "2-digit", month: "2-digit", year: "numeric",
+                    hour: "2-digit", minute: "2-digit",
+                  })}
+                </time>
+              </p>
+            )}
 
             <p className="mt-1 text-sm text-slate-500">
               Zamówienia: {orders.length} | Billing: {payments.length} |

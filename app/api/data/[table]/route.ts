@@ -10,7 +10,7 @@ export async function GET(request: NextRequest, context: { params: Promise<{ tab
     return new Response(null, { status: 401 });
   }
   const { table } = await context.params;
-  if (!["allegro_orders", "allegro_billing_entries"].includes(table)) {
+  if (!["allegro_orders", "allegro_billing_entries", "allegro_sync_state"].includes(table)) {
     return new Response(null, { status: 404 });
   }
   const base = process.env.ALLEGRO_DATA_URL;
